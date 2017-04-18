@@ -25,18 +25,22 @@ class Chef
       option :clean_unknown_clients,
         :long => "--clean-unknown-clients",
         :description => "Remove unknown clients during refresh"
+      option :show_refresh_time,
+        :long => "--show-refresh-time",
+        :description => "Display refresh time for each vault"
 
       def run
         vault = @name_args[0]
         item = @name_args[1]
         clean = config[:clean_unknown_clients]
+        time = config[:show_refresh_time]
 
         set_mode(config[:vault_mode])
 
         if vault && item
           begin
             vault_item = ChefVault::Item.load(vault, item)
-            vault_item.refresh(clean)
+            vault_item.refresh(clean, time)
           rescue ChefVault::Exceptions::KeysNotFound,
                  ChefVault::Exceptions::ItemNotFound
 

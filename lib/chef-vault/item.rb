@@ -231,9 +231,15 @@ class ChefVault
       end
     end
 
-    def save_keys(item_id = @raw_data["id"])
+    def save_keys(item_id = @raw_data["id"], show_refresh_time = false)
       # validate the format of the id before attempting to save
-      validate_id!(item_id)
+      if show_refresh_time
+        measure_time('--> Validate ID format:', 1) do
+          validate_id!(item_id)
+        end
+      else
+        validate_id!(item_id)
+      end
 
       # ensure that the ID of the vault hasn't changed since the keys
       # data bag item was created
@@ -249,7 +255,11 @@ class ChefVault
           "No keys defined for #{item_id}"
       end
 
-      keys.save
+      if show_refresh_time
+        measure_time('--> Save keys:', 1) { keys.save }
+      else
+        keys.save
+      end
     end
 
     def to_json(*a)
@@ -351,7 +361,7 @@ class ChefVault
     # @param clean_unknown_clients [Boolean] remove clients that can
     #   no longer be found
     # @return [void]
-    def refresh(clean_unknown_clients = false)
+    def refresh(clean_unknown_clients = false, show_refresh_time = false)
       unless search
         raise ChefVault::Exceptions::SearchNotFound,
               "#{vault}/#{item} does not have a stored search_query, "\
@@ -360,18 +370,33 @@ class ChefVault
               "databag with the search query."
       end
 
-      # a bit of a misnomer; this doesn't remove unknown
-      # admins, just clients which are nodes
-      remove_unknown_nodes if clean_unknown_clients
-
-      # re-process the search query to add new clients
-      clients
-
-      # save the updated keys only
-      save_keys(@raw_data["id"])
+      if !show_refresh_time
+        # a bit of a misnomer; this doesn't remove unknown
+        # admins, just clients which are nodes
+        remove_unknown_nodes
+        # re-process the search query to add new clients
+        clients
+        # save the updated keys only
+        save_keys
+      else
+        puts "INFO: Refresh time for #{@data_bag}/#{@raw_data['id']}"
+        if clean_unknown_clients
+          measure_time('--> Remove old nodes', 0) { remove_unknown_nodes(show_refresh_time) }
+        end
+        measure_time('--> Add new clients', 0) { clients }
+        measure_time('--> Save updated keys', 0) { save_keys(@raw_data['id'], show_refresh_time) }
+      end
     end
 
     private
+
+    def measure_time(message, depth)
+      puts "INFO: #{'  ' * depth}#{message}"
+      begin_time = Time.now
+      yield
+      end_time = Time.now
+      puts "INFO: #{'  ' * depth}--> * Duration: #{((end_time - begin_time) * 1000).round} ms."
+    end
 
     def encrypt!
       @raw_data = Chef::EncryptedDataBagItem.encrypt_data_bag_item(self, @secret)
@@ -395,17 +420,35 @@ class ChefVault
     # returns nothing or the client cannot be loaded, then
     # we remove that client from the vault
     # @return [void]
-    def remove_unknown_nodes
+    def remove_unknown_nodes(show_refresh_time = false)
       # build a list of clients to remove so we don't
       # mutate the clients while iterating over search results
       clients_to_remove = []
-      get_clients.each do |nodename|
-        clients_to_remove.push(nodename) unless node_exists?(nodename)
+      if show_refresh_time
+        measure_time('--> Build list of clients:', 1) do
+          get_clients.each do |nodename|
+            clients_to_remove.push(nodename) unless node_exists?(nodename)
+          end
+        end
+      else
+        get_clients.each do |nodename|
+          clients_to_remove.push(nodename) unless node_exists?(nodename)
+        end
       end
+        
       # now delete any flagged clients from the keys data bag
-      clients_to_remove.each do |client|
-        ChefVault::Log.warn "Removing unknown client '#{client}'"
-        keys.delete(load_actor(client, "clients"))
+      if show_refresh_time
+        measure_time('--> Remove unknown clients:', 1) do
+          clients_to_remove.each do |client|
+            ChefVault::Log.warn "Removing unknown client '#{client}'"
+            keys.delete(load_actor(client, "clients"))
+          end
+        end
+      else
+        clients_to_remove.each do |client|
+          ChefVault::Log.warn "Removing unknown client '#{client}'"
+          keys.delete(load_actor(client, "clients"))
+        end
       end
     end
 
