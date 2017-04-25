@@ -85,12 +85,14 @@ class ChefVault
       elsif search_or_client.is_a?(Chef::ApiClient)
         handle_client_action(search_or_client, action)
       else
-        search_or_client.each do |name|
-          begin
-            client = load_actor(name, "clients")
-            handle_client_action(client, action)
-          rescue ChefVault::Exceptions::ClientNotFound
-            ChefVault::Log.warn "node '#{name}' has no private key; skipping"
+        measure_time('--> Handle client action') do
+          search_or_client.each do |name|
+            begin
+              client = load_actor(name, "clients")
+              handle_client_action(client, action)
+            rescue ChefVault::Exceptions::ClientNotFound
+              ChefVault::Log.warn "node '#{name}' has no private key; skipping"
+            end
           end
         end
       end
@@ -102,10 +104,12 @@ class ChefVault
       @search_results ||= begin
         results_returned = false
         results = []
-        query = Chef::Search::Query.new
-        query.search(:node, statement, filter_result: { name: ["name"] }, rows: 100000) do |node|
-          results_returned = true
-          results << node["name"]
+        measure_time('--> Search matching nodes') do
+          query = Chef::Search::Query.new
+          query.search(:node, statement, filter_result: { name: ["name"] }, rows: 100000) do |node|
+            results_returned = true
+            results << node["name"]
+          end
         end
 
         unless results_returned
@@ -231,13 +235,9 @@ class ChefVault
       end
     end
 
-    def save_keys(item_id = @raw_data["id"], show_refresh_time = false)
+    def save_keys(item_id = @raw_data["id"])
       # validate the format of the id before attempting to save
-      if show_refresh_time
-        measure_time('--> Validate ID format:', 1) do
-          validate_id!(item_id)
-        end
-      else
+      measure_time('--> Validate ID format:') do
         validate_id!(item_id)
       end
 
@@ -255,11 +255,7 @@ class ChefVault
           "No keys defined for #{item_id}"
       end
 
-      if show_refresh_time
-        measure_time('--> Save keys:', 1) { keys.save }
-      else
-        keys.save
-      end
+      measure_time('--> Save keys:') { keys.save }
     end
 
     def to_json(*a)
@@ -362,6 +358,7 @@ class ChefVault
     #   no longer be found
     # @return [void]
     def refresh(clean_unknown_clients = false, show_refresh_time = false)
+      @show_refresh_time = show_refresh_time
       unless search
         raise ChefVault::Exceptions::SearchNotFound,
               "#{vault}/#{item} does not have a stored search_query, "\
@@ -370,32 +367,30 @@ class ChefVault
               "databag with the search query."
       end
 
-      if !show_refresh_time
-        # a bit of a misnomer; this doesn't remove unknown
-        # admins, just clients which are nodes
-        remove_unknown_nodes
-        # re-process the search query to add new clients
-        clients
-        # save the updated keys only
-        save_keys
-      else
-        puts "INFO: Refresh time for #{@data_bag}/#{@raw_data['id']}"
-        if clean_unknown_clients
-          measure_time('--> Remove old nodes', 0) { remove_unknown_nodes(show_refresh_time) }
-        end
-        measure_time('--> Add new clients', 0) { clients }
-        measure_time('--> Save updated keys', 0) { save_keys(@raw_data['id'], show_refresh_time) }
+      puts "INFO: Refresh time for #{@data_bag}/#{@raw_data['id']}"
+      if clean_unknown_clients
+        measure_time('--> Remove old nodes') { remove_unknown_nodes }
       end
+      measure_time('--> Add new clients') { clients }
+      measure_time('--> Save updated keys') { save_keys(@raw_data['id']) }
     end
 
     private
 
-    def measure_time(message, depth)
-      puts "INFO: #{'  ' * depth}#{message}"
+    def measure_time(message)
       begin_time = Time.now
-      yield
-      end_time = Time.now
-      puts "INFO: #{'  ' * depth}--> * Duration: #{((end_time - begin_time) * 1000).round} ms."
+      if @show_refresh_time
+        @depth ||= 0
+        @depth += 1
+        puts "INFO: #{'  ' * @depth}#{message}"
+      end
+      res = yield
+      if @show_refresh_time
+        end_time = Time.now
+        puts "INFO: #{'  ' * @depth}--> * Duration: #{((end_time - begin_time) * 1000).round} ms."
+        @depth -= 1
+      end
+      res
     end
 
     def encrypt!
@@ -420,31 +415,18 @@ class ChefVault
     # returns nothing or the client cannot be loaded, then
     # we remove that client from the vault
     # @return [void]
-    def remove_unknown_nodes(show_refresh_time = false)
+    def remove_unknown_nodes
       # build a list of clients to remove so we don't
       # mutate the clients while iterating over search results
       clients_to_remove = []
-      if show_refresh_time
-        measure_time('--> Build list of clients:', 1) do
-          get_clients.each do |nodename|
-            clients_to_remove.push(nodename) unless node_exists?(nodename)
-          end
-        end
-      else
+      measure_time('--> Build list of clients:') do
         get_clients.each do |nodename|
           clients_to_remove.push(nodename) unless node_exists?(nodename)
         end
       end
-        
+
       # now delete any flagged clients from the keys data bag
-      if show_refresh_time
-        measure_time('--> Remove unknown clients:', 1) do
-          clients_to_remove.each do |client|
-            ChefVault::Log.warn "Removing unknown client '#{client}'"
-            keys.delete(load_actor(client, "clients"))
-          end
-        end
-      else
+      measure_time('--> Remove unknown clients:') do
         clients_to_remove.each do |client|
           ChefVault::Log.warn "Removing unknown client '#{client}'"
           keys.delete(load_actor(client, "clients"))
@@ -485,10 +467,16 @@ class ChefVault
     def handle_client_action(api_client, action)
       case action
       when :add
-        client = load_actor(api_client.name, "clients")
-        add_client(client)
+        client = measure_time('load actor') do
+          load_actor(api_client.name, "clients")
+        end
+        measure_time('add_client') do
+          add_client(client)
+        end
       when :delete
-        delete_client_or_node(api_client.name)
+        measure_time('delete client') do
+          delete_client_or_node(api_client.name)
+        end
       end
     end
 
